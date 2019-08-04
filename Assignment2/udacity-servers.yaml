@@ -1,0 +1,227 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: 'AWS CloudFormation which creates a load balanced, scalable sample website using Application Load Balancer attached
+  to an Auto Scaling group.'
+
+Parameters:
+  EnvironmentName:
+      Description: An environment name that should match the name used to create the network.
+      Type: String
+      Default: Udacity
+
+  AMI:
+      Description: 'The Machine Image to be used. Please use an Ubuntu Machine Image Specific to your region. Default is set to an AMI
+      in the us-west-2 region.'
+      Type: String
+      Default: ami-0b37e9efc396e4c38
+
+  InstanceType:
+    Description: WebServer EC2 instance type
+    Type: String
+    Default: t2.medium
+    ConstraintDescription: Must be a valid EC2 instance type greater than 4GB RAM.    
+
+Resources:
+  LoadBalancerSG: #This security group allows us to whitelist traffic from the internet to our load balancer
+    Type: "AWS::EC2::SecurityGroup"
+    Properties:
+      GroupDescription: "Load balancer security group"
+      VpcId: 
+        Fn::ImportValue: !Sub "${EnvironmentName}-VPCID"      
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          CidrIp: "0.0.0.0/0"
+          FromPort: 80
+          ToPort: 80
+        
+
+  AppSG: #This security group holds the application
+    Type: "AWS::EC2::SecurityGroup"
+    Properties:
+      GroupDescription: "Application security group"
+      VpcId: 
+        Fn::ImportValue: !Sub "${EnvironmentName}-VPCID" 
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          SourceSecurityGroupId: !Ref LoadBalancerSG
+          FromPort: 80
+          ToPort: 80
+
+        - IpProtocol: tcp
+          SourceSecurityGroupId: 
+            Fn::ImportValue: !Sub "${EnvironmentName}-BastionSecurityGroupID"
+          FromPort: 22
+          ToPort: 22  
+
+  AppLoadBalancer:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Scheme: internet-facing
+      Subnets: 
+        - Fn::ImportValue: !Sub "${EnvironmentName}-PUB1-SN"
+        - Fn::ImportValue: !Sub "${EnvironmentName}-PUB2-SN"
+      SecurityGroups:
+        - !Ref LoadBalancerSG  
+
+  AppTargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    DependsOn: 
+      - AppLoadBalancer
+    Properties:
+      TargetType: instance  #the default is "instance" but we must use ip to forward to fargate
+      VpcId: 
+        Fn::ImportValue: !Sub "${EnvironmentName}-VPCID" 
+      Protocol: HTTP # do not change to HTTPS
+      Port: 80
+      HealthCheckPath: /
+      HealthCheckIntervalSeconds: 10
+      HealthCheckTimeoutSeconds: 5
+      HealthyThresholdCount: 2
+      UnhealthyThresholdCount: 5
+
+  ALBListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    DependsOn:
+      - AppLoadBalancer
+      - AppTargetGroup
+    Properties:
+      DefaultActions:
+      - Type: forward
+        TargetGroupArn: !Ref AppTargetGroup
+      LoadBalancerArn: !Ref AppLoadBalancer
+      Port: 80
+      Protocol: HTTP 
+ 
+  UdacityS3ReadOnlyEC2:
+    Type: AWS::IAM::Role
+    Properties:
+      ManagedPolicyArns: 
+        - "arn:aws:iam::aws:policy/CloudWatchFullAccess"
+        - "arn:aws:iam::aws:policy/AmazonS3ReadOnlyAccess"
+      AssumeRolePolicyDocument: 
+        Version: "2012-10-17"
+        Statement: 
+          - 
+            Effect: "Allow"
+            Principal: 
+              Service: 
+                - "ec2.amazonaws.com"
+            Action: 
+              - "sts:AssumeRole"
+      Path: "/"
+
+  ProfileWithRolesForApp: 
+    Type: AWS::IAM::InstanceProfile
+    Properties: 
+      Path: "/"
+      Roles: 
+        - !Ref UdacityS3ReadOnlyEC2
+  
+  WebServerGroup:
+    Type: AWS::AutoScaling::AutoScalingGroup
+    Properties:
+      VPCZoneIdentifier:        
+         - Fn::ImportValue: !Sub "${EnvironmentName}-PRI1-SN" 
+         - Fn::ImportValue: !Sub "${EnvironmentName}-PRI2-SN" 
+      LaunchConfigurationName:
+        Ref: LaunchConfig
+      MinSize: '2'
+      MaxSize: '3'
+      TargetGroupARNs:
+      - Ref: AppTargetGroup
+      
+    
+
+  WebServerScaleUpPolicy:
+    Type: AWS::AutoScaling::ScalingPolicy
+    Properties:
+      AdjustmentType: ChangeInCapacity
+      AutoScalingGroupName:
+        Ref: WebServerGroup
+      Cooldown: '60'
+      ScalingAdjustment: '1'
+
+  WebServerScaleDownPolicy:
+    Type: AWS::AutoScaling::ScalingPolicy
+    Properties:
+      AdjustmentType: ChangeInCapacity
+      AutoScalingGroupName:
+        Ref: WebServerGroup
+      Cooldown: '60'
+      ScalingAdjustment: "-1"
+
+  CPUAlarmHigh:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmDescription: Scale-up if CPU > 90% for 10 minutes
+      MetricName: CPUUtilization
+      Namespace: AWS/EC2
+      Statistic: Average
+      Period: '300'
+      EvaluationPeriods: '2'
+      Threshold: '90'
+      AlarmActions:
+      - Ref: WebServerScaleUpPolicy
+      Dimensions:
+      - Name: AutoScalingGroupName
+        Value:
+          Ref: WebServerGroup
+      ComparisonOperator: GreaterThanThreshold
+
+  CPUAlarmLow:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmDescription: Scale-down if CPU < 70% for 10 minutes
+      MetricName: CPUUtilization
+      Namespace: AWS/EC2
+      Statistic: Average
+      Period: '300'
+      EvaluationPeriods: '2'
+      Threshold: '70'
+      AlarmActions:
+      - Ref: WebServerScaleDownPolicy
+      Dimensions:
+      - Name: AutoScalingGroupName
+        Value:
+          Ref: WebServerGroup
+      ComparisonOperator: LessThanThreshold
+  
+  LaunchConfig:
+    Type: AWS::AutoScaling::LaunchConfiguration
+    Properties: 
+      ImageId: !Ref AMI
+      InstanceType: !Ref InstanceType
+      BlockDeviceMappings: 
+      - DeviceName: /dev/sda1
+        Ebs: 
+          VolumeSize: 10
+          VolumeType: gp2
+      IamInstanceProfile: !Ref ProfileWithRolesForApp
+      SecurityGroups:
+        - !Ref AppSG
+      UserData:
+        Fn::Base64:
+          Fn::Join:
+           - ''
+           - - "#!/bin/bash \n"
+             - "apt-get update -y \n"
+             - "apt-get install unzip awscli -y \n"
+             - "apt-get install apache2 -y \n"
+             - "systemctl start apache2.service \n"
+             - "cd /var/www/html \n "
+             - "aws s3 cp s3://udacity-demo-1/udacity.zip . \n"
+             - "unzip -o udacity.zip \n"
+             
+Outputs:
+  URL:
+    Description: The URL of the website
+    Value:
+      Fn::Join:
+      - ''
+      - - http://
+        - Fn::GetAtt:
+          - AppLoadBalancer
+          - DNSName
+
+
+        
+              

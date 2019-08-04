@@ -1,0 +1,115 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: " Create an Amazon EC2 instance which acts as the Single Server. This example creates an EC2 security group for the instance to give you SSH access."
+Parameters:
+ EnvironmentName:
+  Description: An environment name that should match the name used to create the network.
+  Type: String
+  Default: Udacity 
+
+ KeyName: 
+  Description: "Name of an existing EC2 KeyPair to enable SSH access to the instance"
+  Type: "AWS::EC2::KeyPair::KeyName"
+  Default: AmitTestKP
+  ConstraintDescription: "must be the name of an existing EC2 KeyPair."
+
+ AMI:
+  Description: 'The Machine Image to be used. Please use an Ubuntu Machine Image Specific to your region. Default is set to an AMI
+  in the us-west-2 region.'
+  Type: String
+  Default: ami-0b37e9efc396e4c38  
+  
+  
+ 
+ InstanceType: 
+  Description: "Bastion EC2 instance type"
+  Type: String
+  Default: "t2.medium"
+
+
+Resources: 
+ WebServerInstance: 
+  Type: "AWS::EC2::Instance"
+  Properties: 
+   InstanceType: !Ref InstanceType
+   SecurityGroupIds: 
+    - !Ref InstanceSecurityGroup
+   KeyName: !Ref KeyName
+   ImageId: !Ref AMI
+
+   SubnetId: 
+    Fn::ImportValue: !Sub "${EnvironmentName}-PUB1-SN"
+   IamInstanceProfile: !Ref ProfileWithRolesForApp
+   UserData:
+        Fn::Base64:
+          Fn::Join:
+           - ''
+           - - "#!/bin/bash \n"
+             - "apt-get update -y \n"
+             - "apt-get install unzip awscli -y \n"
+             - "apt-get install apache2 -y \n"
+             - "systemctl start apache2.service \n"
+             - "cd /var/www/html \n "
+             - "aws s3 cp s3://udacity-demo-1/udacity.zip . \n"
+             - "unzip -o udacity.zip \n"
+             - "/opt/aws/bin/cfn-signal -e $? "
+             - "         --stack "
+             - !Ref AWS::StackName
+             - "         --resource WebServerGroup "
+             - "         --region "
+             - !Ref AWS::Region
+             - "\n"
+ InstanceSecurityGroup: 
+  Type: "AWS::EC2::SecurityGroup"
+  Properties: 
+   GroupDescription: "Enable SSH  & access via port 22"
+   VpcId: 
+        Fn::ImportValue: !Sub "${EnvironmentName}-VPCID"  
+   SecurityGroupIngress: 
+    - IpProtocol: tcp
+      FromPort: 22
+      ToPort: 22
+      CidrIp:  "0.0.0.0/0"
+
+    - IpProtocol: tcp
+      FromPort: 80
+      ToPort: 80
+      CidrIp:  "0.0.0.0/0" 
+
+ UdacityS3ReadOnlyEC2:
+    Type: AWS::IAM::Role
+    Properties:
+      ManagedPolicyArns: 
+        - "arn:aws:iam::aws:policy/CloudWatchFullAccess"
+        - "arn:aws:iam::aws:policy/AmazonS3ReadOnlyAccess"
+      AssumeRolePolicyDocument: 
+        Version: "2012-10-17"
+        Statement: 
+          - 
+            Effect: "Allow"
+            Principal: 
+              Service: 
+                - "ec2.amazonaws.com"
+            Action: 
+              - "sts:AssumeRole"
+      Path: "/"
+
+ ProfileWithRolesForApp: 
+    Type: AWS::IAM::InstanceProfile
+    Properties: 
+      Path: "/"
+      Roles: 
+        - !Ref UdacityS3ReadOnlyEC2           
+      
+Outputs: 
+ InstanceId: 
+  Description: "InstanceId of the newly created EC2 instance"
+  Value: 
+   Ref: WebServerInstance
+ 
+ 
+ PublicIP: 
+  Description: "Public IP address of the newly created EC2 instance"
+  Value: 
+   "Fn::GetAtt": 
+    - WebServerInstance
+    - PublicIp
