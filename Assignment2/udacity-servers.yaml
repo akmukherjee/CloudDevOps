@@ -17,7 +17,7 @@ Parameters:
   InstanceType:
     Description: WebServer EC2 instance type
     Type: String
-    Default: t2.medium
+    Default: t3.medium
     ConstraintDescription: Must be a valid EC2 instance type greater than 4GB RAM.    
 
 Resources:
@@ -32,6 +32,13 @@ Resources:
           CidrIp: "0.0.0.0/0"
           FromPort: 80
           ToPort: 80
+
+      SecurityGroupEgress:
+        - IpProtocol: tcp
+          CidrIp: "0.0.0.0/0"
+          FromPort: 80
+          ToPort: 80
+            
         
 
   AppSG: #This security group holds the application
@@ -124,8 +131,8 @@ Resources:
          - Fn::ImportValue: !Sub "${EnvironmentName}-PRI2-SN" 
       LaunchConfigurationName:
         Ref: LaunchConfig
-      MinSize: '2'
-      MaxSize: '3'
+      MinSize: '4'
+      MaxSize: '6'
       TargetGroupARNs:
       - Ref: AppTargetGroup
       
